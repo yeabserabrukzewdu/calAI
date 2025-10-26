@@ -1,44 +1,69 @@
 import { GoogleGenAI, Type } from "@google/genai";
-// FIX: Corrected import path for FoodItem type.
-import { FoodItem } from "../types";
+import type { FoodItem, LogEntry, MacroGoals } from "../types";
 
-if (!process.env.API_KEY) {
-  throw new Error("API_KEY environment variable is not set.");
-}
+// Singleton AI instance to reduce overhead (recreated only if API key changes)
+let aiInstance: GoogleGenAI | null = null;
+let cachedKey: string | null = null;
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+const getAIInstance = (): GoogleGenAI => {
+  const currentKey = process.env.API_KEY;
+  if (!currentKey) {
+    throw new Error("API_KEY environment variable is required.");
+  }
+  if (!aiInstance || cachedKey !== currentKey) {
+    aiInstance = new GoogleGenAI({ apiKey: currentKey });
+    cachedKey = currentKey;
+  }
+  return aiInstance;
+};
 
 const foodItemSchema = {
   type: Type.OBJECT,
   properties: {
-    name: { type: Type.STRING, description: "Name of the food item." },
-    calories: { type: Type.NUMBER, description: "Estimated calories." },
-    protein: { type: Type.NUMBER, description: "Estimated grams of protein." },
-    carbs: { type: Type.NUMBER, description: "Estimated grams of carbohydrates." },
-    fat: { type: Type.NUMBER, description: "Estimated grams of fat." },
-    portion: { type: Type.STRING, description: "Estimated portion size, e.g., '100g' or '1 cup'." },
+    name: { type: Type.STRING, description: "The name of the food item." },
+    portion: { type: Type.STRING, description: "The estimated portion size (e.g., '1 cup', '100g')." },
+    calories: { type: Type.NUMBER, description: "Estimated calories for the portion." },
+    protein: { type: Type.NUMBER, description: "Estimated protein in grams." },
+    carbs: { type: Type.NUMBER, description: "Estimated carbohydrates in grams." },
+    fat: { type: Type.NUMBER, description: "Estimated fat in grams." },
   },
-  required: ["name", "calories", "protein", "carbs", "fat", "portion"],
+  required: ["name", "portion", "calories", "protein", "carbs", "fat"],
 };
 
+/**
+ * Centralized error handler for API calls.
+ */
+const handleAPIError = (error: unknown, context: string): never => {
+  console.error(`Error in ${context}:`, error);
+  throw new Error(`Failed to ${context}. Please check your connection and try again.`);
+};
 
-export const analyzeMealImage = async (base64Image: string, mimeType: string): Promise<FoodItem[]> => {
+/**
+ * Analyzes an image of food and returns a list of identified food items with nutritional information.
+ * @param base64ImageData The base64 encoded image data (without the data URL prefix).
+ * @param mimeType The MIME type of the image (e.g., 'image/jpeg', 'image/png').
+ * @returns A promise that resolves to an array of FoodItem objects.
+ */
+export const identifyFoodFromImage = async (
+  base64ImageData: string,
+  mimeType: string
+): Promise<FoodItem[]> => {
   try {
+    const ai = getAIInstance();
+    const imagePart = {
+      inlineData: {
+        mimeType: mimeType,
+        data: base64ImageData,
+      },
+    };
+
+    const textPart = {
+      text: `Analyze the image and identify each distinct food item. For each item, provide its name, estimated portion size, and nutritional information (calories, protein, carbs, fat). Respond only with valid JSON, no additional text. Return the data as a JSON array of objects matching the schema.`,
+    };
+
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: [{
-        parts: [
-          {
-            text: 'Analyze this image of a meal. Identify each food item, estimate its portion size, and provide its nutritional information (calories, protein, carbs, fat).',
-          },
-          {
-            inlineData: {
-              mimeType: mimeType,
-              data: base64Image,
-            },
-          },
-        ],
-      }],
+      model: "gemini-2.5-flash",
+      contents: { parts: [imagePart, textPart] },
       config: {
         responseMimeType: "application/json",
         responseSchema: {
@@ -48,72 +73,161 @@ export const analyzeMealImage = async (base64Image: string, mimeType: string): P
       },
     });
 
-    const resultText = response.text.trim();
-    const result = JSON.parse(resultText);
+    if (typeof response.text !== "string") {
+      throw new Error("Invalid API response format: expected string text.");
+    }
 
-    // Add a unique ID to each food item
-    return result.map((item: Omit<FoodItem, 'id'>) => ({
-        ...item,
-        id: crypto.randomUUID(),
-    }));
+    const jsonString = response.text.trim();
+    if (!jsonString) {
+      throw new Error("API returned an empty response.");
+    }
 
+    const foodItems: FoodItem[] = JSON.parse(jsonString);
+    // Basic validation: ensure all items have required fields
+    foodItems.forEach((item, index) => {
+      if (!item.name || typeof item.calories !== "number") {
+        throw new Error(`Invalid data for food item at index ${index}: missing required fields.`);
+      }
+    });
+
+    return foodItems;
   } catch (error) {
-    console.error("Error analyzing meal image:", error);
-    throw new Error("Failed to analyze image. The AI could not process the request.");
+    if (error instanceof Error && error.message.includes("API_KEY")) {
+      throw error; // Preserve original for auth issues
+    }
+    handleAPIError(error, "analyze the food image");
   }
 };
 
+/**
+ * Searches for a food item by name and returns its nutritional information.
+ * @param query The user's search query (e.g., "one banana").
+ * @returns A promise that resolves to a single FoodItem object or null if not found.
+ */
 export const searchFoodDatabase = async (query: string): Promise<FoodItem | null> => {
-    try {
-        const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
-            contents: {
-                parts: [
-                    { text: `Provide nutritional information for "${query}". If it's a generic item, assume a standard portion size (e.g., 1 medium for fruit, 100g for meat).` },
-                ],
-            },
-            config: {
-                responseMimeType: "application/json",
-                responseSchema: foodItemSchema,
-            },
-        });
+  try {
+    const ai = getAIInstance();
 
-        const resultText = response.text.trim();
-        if (!resultText) return null;
+    const prompt = `
+      Provide estimated nutritional information for the following food query: "${query}".
+      Return a single JSON object with the following properties: name, portion, calories, protein, carbs, and fat.
+      For the name, use a standardized name for the food item. For portion, use a common serving size (e.g., '1 cup', '100g', '1 medium apple').
+      If the query is ambiguous or you cannot find a reasonable match, respond with null (as a JSON null value).
+      Respond only with valid JSON, no additional text.
+    `;
 
-        const result = JSON.parse(resultText);
-        return { ...result, id: crypto.randomUUID() };
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            name: { type: Type.STRING },
+            portion: { type: Type.STRING },
+            calories: { type: Type.NUMBER },
+            protein: { type: Type.NUMBER },
+            carbs: { type: Type.NUMBER },
+            fat: { type: Type.NUMBER },
+          },
+        },
+      },
+    });
 
-    } catch (error) {
-        console.error("Error searching food database:", error);
-        throw new Error("Failed to search for food item.");
+    if (typeof response.text !== "string") {
+      throw new Error("Invalid API response format: expected string text.");
     }
+
+    const jsonString = response.text.trim();
+    if (!jsonString || jsonString.toLowerCase() === "null" || jsonString === "{}") {
+      return null;
+    }
+
+    const foodItem: FoodItem = JSON.parse(jsonString);
+    // Basic validation
+    if (!foodItem.name || typeof foodItem.calories !== "number") {
+      return null;
+    }
+
+    return foodItem;
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("API_KEY")) {
+      throw error;
+    }
+    handleAPIError(error, `search for food "${query}"`);
+  }
 };
 
-export const getPersonalizedInsights = async (log: FoodItem[], goals: {calories: number, protein: number, carbs: number, fat: number}): Promise<string> => {
-    try {
-        const logSummary = log.map(item => `${item.name} (${item.calories} kcal)`).join(', ');
-        const prompt = `
-            Based on the following daily food log and nutritional goals, provide some personalized insights and recommendations.
-            
-            Today's Log: ${logSummary || 'No items logged.'}
-            
-            Goals:
-            - Calories: ${goals.calories} kcal
-            - Protein: ${goals.protein} g
-            - Carbohydrates: ${goals.carbs} g
-            - Fat: ${goals.fat} g
-            
-            Analyze my intake, suggest one healthy meal for tomorrow, and provide a brief, encouraging tip. Keep the response formatted in Markdown.
-        `;
-        const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
-            contents: prompt,
-        });
+/**
+ * Generates personalized nutritional insights based on logged foods and goals.
+ * @param loggedFoods An array of food log entries for a specific period.
+ * @param goals The user's daily macro goals.
+ * @returns A promise that resolves to a string containing personalized insights in Markdown format.
+ */
+export const getPersonalizedInsights = async (
+  loggedFoods: LogEntry[],
+  goals: MacroGoals
+): Promise<string> => {
+  if (loggedFoods.length === 0) {
+    return "No food has been logged yet. Log some meals to get your personalized AI insights!";
+  }
 
-        return response.text;
-    } catch (error) {
-        console.error("Error getting personalized insights:", error);
-        throw new Error("Failed to generate insights.");
+  try {
+    const ai = getAIInstance();
+
+    const totals = loggedFoods.reduce(
+      (acc, item) => {
+        acc.calories += item.calories;
+        acc.protein += item.protein;
+        acc.carbs += item.carbs;
+        acc.fat += item.fat;
+        return acc;
+      },
+      { calories: 0, protein: 0, carbs: 0, fat: 0 }
+    );
+
+    // Calculate progress percentages for more precise insights
+    const progress = {
+      calories: Math.round((totals.calories / goals.calories) * 100),
+      protein: Math.round((totals.protein / goals.protein) * 100),
+      carbs: Math.round((totals.carbs / goals.carbs) * 100),
+      fat: Math.round((totals.fat / goals.fat) * 100),
+    };
+
+    const foodList = loggedFoods.map((f) => `- ${f.name} (${f.calories} kcal)`).join("\n");
+
+    const prompt = `
+      You are a friendly and encouraging nutrition coach. Analyze the user's food log for the day and provide personalized insights.
+      The user's daily goals are: ${goals.calories} calories, ${goals.protein}g protein, ${goals.carbs}g carbs, and ${goals.fat}g fat.
+      So far today, they have consumed: ${totals.calories} calories (${progress.calories}% of goal), ${totals.protein}g protein (${progress.protein}% of goal), ${totals.carbs}g carbs (${progress.carbs}% of goal), and ${totals.fat}g fat (${progress.fat}% of goal).
+      
+      Here are the foods they ate:
+      ${foodList}
+
+      Based on this, provide 2-3 short, actionable, and positive insights in Markdown format (use bullet points).
+      - Start with a positive observation.
+      - Compare their current intake to their goals (e.g., "You're on track with your protein goal at ${progress.protein}%!").
+      - Offer a simple, helpful suggestion for their next meal or for tomorrow.
+      - Keep the tone friendly and supportive, not critical.
+      - Do not just list the numbers back to them. Provide actual insight.
+      Respond only with the Markdown content, no additional text.
+    `;
+
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: prompt,
+    });
+
+    if (typeof response.text !== "string") {
+      throw new Error("Invalid API response format: expected string text.");
     }
+
+    return response.text.trim();
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("API_KEY")) {
+      throw error;
+    }
+    handleAPIError(error, "generate personalized insights");
+  }
 };
