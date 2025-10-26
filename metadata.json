@@ -1,0 +1,8 @@
+{
+  "name": "NutriTrack AI",
+  "description": "An intelligent nutrition tracker that uses AI to log meals from photos, voice, and barcode scans. It offers personalized insights, macro tracking, and tools for a healthier lifestyle.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera"
+  ]
+}
