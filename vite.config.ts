@@ -18,6 +18,14 @@ export default defineConfig(({ mode }) => {
         alias: {
           '@': path.resolve(__dirname, '.'),
         }
-      }
+      },
+      build: {
+        target: 'es2022',  // Enables top-level await support; adjust if needing legacy browsers
+      },
+      optimizeDeps: {
+        esbuildOptions: {
+          target: 'es2022',  // Ensures dev server handles it too
+        },
+      },
     };
 });
