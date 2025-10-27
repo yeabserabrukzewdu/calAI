@@ -3,6 +3,7 @@
 
 import type React from "react"
 import { useState, useEffect } from "react"
+import { motion, AnimatePresence } from "framer-motion";
 import { updateUserProfile } from "../services/localStorageService"
 import { XIcon } from "./Icons"
 import { useTranslation } from "../contexts/LanguageContext"
@@ -242,10 +243,19 @@ const UserQuizModal: React.FC<UserQuizModalProps> = ({ onClose, onComplete }) =>
 
 
   return (
-    <div className="fixed inset-0 bg-gray-100 flex items-center justify-center z-50 p-4 h-screen w-screen overflow-hidden">
-      <div
-        className={`relative bg-white rounded-2xl p-8 w-full max-w-2xl shadow-2xl border border-gray-200 animate-${direction === "left" ? "slide-left" : "slide-right"} transition-transform duration-300`}
-      >
+  <div className="fixed inset-0 bg-gray-100 flex items-center justify-center z-50 h-screen w-screen overflow-hidden">
+  <AnimatePresence mode="wait" initial={false} custom={direction}>
+    <motion.div
+      key={step}
+      custom={direction}
+      initial={{ x: direction === "left" ? 300 : -300, opacity: 0 }}
+      animate={{ x: 0, opacity: 1 }}
+      exit={{ x: direction === "left" ? -300 : 300, opacity: 0 }}
+      transition={{ duration: 0.4, ease: "easeInOut" }}
+      className="relative bg-white rounded-2xl p-8 w-full h-full max-w-4xl shadow-2xl border border-gray-200 overflow-y-auto"
+    >
+      {/* your existing modal content goes here */}
+
         <div className="flex justify-between items-start mb-8">
           <div>
             <h2 className="text-3xl font-bold bg-gradient-to-r from-orange-600 to-orange-500 bg-clip-text text-transparent">
@@ -588,8 +598,11 @@ const UserQuizModal: React.FC<UserQuizModalProps> = ({ onClose, onComplete }) =>
             {t('skipQuiz')}
           </button>
         </div>
-      </div>
-    </div>
+          </motion.div>
+  </AnimatePresence>
+</div>
+
+   
   )
 }
 
